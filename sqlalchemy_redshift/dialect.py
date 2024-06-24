@@ -4,7 +4,7 @@ from collections import defaultdict, namedtuple
 from packaging.version import Version
 import pkg_resources
 import sqlalchemy as sa
-from sqlalchemy import inspect
+from sqlalchemy import inspect, exc as sa_exc
 from sqlalchemy.dialects.postgresql.base import (
     PGCompiler, PGDDLCompiler, PGIdentifierPreparer, PGTypeCompiler,
     PGExecutionContext, PGDialect
@@ -560,7 +560,7 @@ class RedshiftDialectMixin(DefaultDialect):
     max_identifier_length = 127
     # explicitly disables statement cache to disable warnings in logs
     # ref: https://docs.sqlalchemy.org/en/14/core/connections.html#caching-for-third-party-dialects  # noqa
-    supports_statement_cache = False
+    supports_statement_cache = True
 
     statement_compiler = RedshiftCompiler
     ddl_compiler = RedshiftDDLCompiler
@@ -1053,16 +1053,49 @@ class RedshiftDialect_redshift_connector(RedshiftDialectMixin, PGDialect):
 
     class RedshiftCompiler_redshift_connector(RedshiftCompiler, PGCompiler):
         def limit_clause(self, select, **kw):
-            text = ""
-            if select._limit_clause is not None:
-                # an integer value for limit is retrieved
-                text += " \n LIMIT " + str(select._limit)
-            if select._offset_clause is not None:
-                if select._limit_clause is None:
-                    text += "\n LIMIT ALL"
-                # an integer value for offset is retrieved
-                text += " OFFSET " + str(select._offset)
-            return text
+            if sa_version >= Version('1.4.0'):
+                text = ""
+
+                limit_clause = select._limit_clause
+                offset_clause = select._offset_clause
+
+                if select._simple_int_clause(limit_clause):
+                    text += " \n LIMIT %s" % (
+                        self.process(
+                            limit_clause.render_literal_execute(),
+                            **kw
+                        )
+                    )
+                elif limit_clause is not None:
+                    raise sa_exc.CompileError(
+                        "dialect 'redshift-dialect' can only \
+                             render simple integers for LIMIT"
+                    )
+                if select._simple_int_clause(offset_clause):
+                    text += " \n OFFSET %s" % (
+                        self.process(
+                            offset_clause.render_literal_execute(),
+                            **kw
+                        )
+                    )
+                elif offset_clause is not None:
+                    raise sa_exc.CompileError(
+                        "dialect 'redshift-dialect' can only \
+                            render simple integers for OFFSET"
+                    )
+
+                return text
+            else:
+                text = ""
+                if select._limit_clause is not None:
+                    # an integer value for limit is retrieved
+                    text += " \n LIMIT " + str(select._limit)
+                if select._offset_clause is not None:
+                    if select._limit_clause is None:
+                        text += "\n LIMIT ALL"
+                    # an integer value for offset is retrieved
+                    text += " OFFSET " + str(select._offset)
+                return text
 
         def visit_mod_binary(self, binary, operator, **kw):
             return (
